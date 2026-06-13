@@ -1,3 +1,10 @@
+
+
+<p align="center">
+  <img src="https://res.cloudinary.com/dzulab559/image/upload/v1781341183/secret_1_wckq5b.png" alt="secret-store logo" width="700">
+</p>
+
+
 # secret-store
 
 Encrypted CLI secret manager for developers. Store API keys, tokens, passwords locally with a master password. Built-in fuzzy search.
