@@ -2,7 +2,6 @@
 set -e
 
 REPO="https://github.com/Samujalphukan228/secret-store"
-RAW="https://raw.githubusercontent.com/Samujalphukan228/secret-store/main"
 BIN_NAME="secret"
 BIN_DIR="$HOME/.local/bin"
 
@@ -57,7 +56,7 @@ build() {
 
     info "Cloning secret-store"
     TMP_DIR=$(mktemp -d)
-    git clone --depth 1 "$REPO" "$TMP_DIR/secret-store" >/dev/null 2>&1
+    git clone --depth 1 "$REPO" "$TMP_DIR/secret-store" || die "git clone failed"
     success "Cloned"
 
     info "Building (this may take a moment on first run)"
@@ -90,15 +89,6 @@ ensure_path() {
     esac
 }
 
-# ── step 5: reload shell ──────────────────────────────────────────────────────
-
-reload_shell() {
-    RC=$(detect_shell_rc)
-    info "Reloading shell config"
-    . "$RC" 2>/dev/null || true
-    success "Shell config reloaded"
-}
-
 # ── main ───────────────────────────────────────────────────────────────────────
 
 printf "\n\033[1msecret-store installer\033[0m\n\n"
@@ -107,14 +97,11 @@ install_rust_if_needed
 check_xclip
 build
 ensure_path
-reload_shell
 
-RC=$(detect_shell_rc)
+export PATH="$BIN_DIR:$PATH"
 
 printf "\n\033[1;32mAll done!\033[0m\n\n"
-printf "Run this once to activate in your current terminal:\n\n"
-printf "  \033[1msource %s\033[0m\n\n" "$RC"
-printf "Then initialize:\n\n"
+printf "Initialize:\n\n"
 printf "  \033[1msecret init\033[0m\n\n"
 printf "And try:\n\n"
 printf "  \033[1mss test 'hello'\033[0m\n"

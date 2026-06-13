@@ -22,6 +22,14 @@ sl                            # list all (encrypted)
 ## Install
 
 ```bash
+. <(curl -sSf https://raw.githubusercontent.com/Samujalphukan228/secret-store/master/install.sh)
+```
+
+This installs Rust (if needed), builds the binary, adds `~/.local/bin` to your `PATH`, and is ready to use immediately — no extra steps.
+
+### Manual install
+
+```bash
 git clone https://github.com/Samujalphukan228/secret-store
 cd secret-store
 cargo build --release

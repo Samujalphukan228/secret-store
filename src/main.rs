@@ -49,27 +49,25 @@ struct SecretStore {
     secrets: Vec<Secret>,
 }
 
-fn get_store_path() -> PathBuf {
-    let mut path = home_dir().expect("Could not find home directory");
-    path.push(".secret-store");
-    path.push("secrets.json");
-    path
-}
-
 fn get_store_dir() -> PathBuf {
     let mut path = home_dir().expect("Could not find home directory");
     path.push(".secret-store");
     path
 }
 
+fn get_store_path() -> PathBuf {
+    let mut path = get_store_dir();
+    path.push("secrets.json");
+    path
+}
+
 fn load_store() -> Option<SecretStore> {
     let path = get_store_path();
-    if path.exists() {
-        let data = fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&data).ok()
-    } else {
-        None
+    if !path.exists() {
+        return None;
     }
+    let data = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
 }
 
 fn save_store(store: &SecretStore) {
@@ -85,16 +83,15 @@ fn save_store(store: &SecretStore) {
 
     #[cfg(unix)]
     {
-        use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
-        let perms = Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms).expect("Failed to set file permissions");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("Failed to set file permissions");
     }
 }
 
 fn hash_password(password: &str, salt: &SaltString) -> String {
-    let argon2 = Argon2::default();
-    argon2.hash_password(password.as_bytes(), salt)
+    Argon2::default()
+        .hash_password(password.as_bytes(), salt)
         .unwrap()
         .to_string()
 }
@@ -106,50 +103,14 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-fn encrypt_secret(value: &str, password: &str) -> String {
-    let key_bytes = derive_key(password);
-    let cipher = ChaCha20Poly1305::new(&key_bytes);
-    
-    let nonce_bytes = rand::thread_rng().gen::<[u8; 12]>();
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    
-    let ciphertext = cipher
-        .encrypt(nonce, Payload::from(value.as_bytes()))
-        .expect("Encryption failed");
-    
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend(ciphertext);
-    hex::encode(combined)
-}
-
-fn decrypt_secret(encrypted: &str, password: &str) -> Result<String, String> {
-    let key_bytes = derive_key(password);
-    let cipher = ChaCha20Poly1305::new(&key_bytes);
-    
-    let combined = hex::decode(encrypted).map_err(|_| "Invalid encrypted data")?;
-    
-    if combined.len() < 12 {
-        return Err("Invalid encrypted data".to_string());
-    }
-    
-    let (nonce_bytes, ciphertext) = combined.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    
-    let plaintext = cipher
-        .decrypt(nonce, Payload::from(ciphertext))
-        .map_err(|_| "Decryption failed - wrong password?")?;
-    
-    Ok(String::from_utf8(plaintext).map_err(|_| "Invalid UTF-8".to_string())?)
-}
-
 fn derive_key(password: &str) -> Key {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let mut hasher = DefaultHasher::new();
     password.hash(&mut hasher);
     let hash = hasher.finish();
-    
+
     let mut key_bytes = [0u8; 32];
     for i in 0..8 {
         key_bytes[i] = ((hash >> (i * 8)) & 0xff) as u8;
@@ -158,14 +119,59 @@ fn derive_key(password: &str) -> Key {
     for i in 16..32 {
         key_bytes[i] = key_bytes[i - 16] ^ key_bytes[i - 8];
     }
-    
+
     Key::from(key_bytes)
+}
+
+fn encrypt_secret(value: &str, password: &str) -> String {
+    let key_bytes = derive_key(password);
+    let cipher = ChaCha20Poly1305::new(&key_bytes);
+
+    let nonce_bytes = rand::thread_rng().gen::<[u8; 12]>();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, Payload::from(value.as_bytes()))
+        .expect("Encryption failed");
+
+    let mut combined = nonce_bytes.to_vec();
+    combined.extend(ciphertext);
+    hex::encode(combined)
+}
+
+fn decrypt_secret(encrypted: &str, password: &str) -> Result<String, String> {
+    let key_bytes = derive_key(password);
+    let cipher = ChaCha20Poly1305::new(&key_bytes);
+
+    let combined = hex::decode(encrypted).map_err(|_| "Invalid encrypted data")?;
+
+    if combined.len() < 12 {
+        return Err("Invalid encrypted data".to_string());
+    }
+
+    let (nonce_bytes, ciphertext) = combined.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let plaintext = cipher
+        .decrypt(nonce, Payload::from(ciphertext))
+        .map_err(|_| "Decryption failed - wrong password?")?;
+
+    String::from_utf8(plaintext).map_err(|_| "Invalid UTF-8".to_string())
 }
 
 fn prompt_password(prompt: &str) -> String {
     eprint!("{}", prompt.cyan().bold());
-    std::io::stderr().flush().ok();
+    io::stderr().flush().ok();
     rpassword::read_password().expect("Failed to read password")
+}
+
+fn ensure_authenticated(store: &SecretStore) -> String {
+    let password = prompt_password("Enter master password: ");
+    if !verify_password(&password, &store.password_hash) {
+        eprintln!("{} Wrong password", "✗".red().bold());
+        std::process::exit(1);
+    }
+    password
 }
 
 fn matches_fuzzy(name_lower: &str, query: &str) -> bool {
@@ -191,8 +197,10 @@ fn matches_fuzzy(name_lower: &str, query: &str) -> bool {
 
 fn find_secret_fuzzy(store: &SecretStore, query: &str) -> Option<Secret> {
     let query_lower = query.to_lowercase();
-    
-    let mut matches: Vec<_> = store.secrets.iter()
+
+    let matches: Vec<_> = store
+        .secrets
+        .iter()
         .filter(|s| {
             let name_lower = s.key.to_lowercase();
             name_lower.contains(&query_lower) || matches_fuzzy(&name_lower, &query)
@@ -200,34 +208,32 @@ fn find_secret_fuzzy(store: &SecretStore, query: &str) -> Option<Secret> {
         .cloned()
         .collect();
 
-    if matches.is_empty() {
-        return None;
+    match matches.len() {
+        0 => None,
+        1 => Some(matches[0].clone()),
+        _ => {
+            println!("{} Multiple matches for '{}':\n", "→".cyan().bold(), query.yellow());
+
+            for (i, secret) in matches.iter().enumerate() {
+                println!(
+                    "  {}  {}",
+                    format!("{}", i + 1).yellow().bold(),
+                    secret.key.bright_cyan()
+                );
+            }
+
+            println!();
+            eprint!("{}", "Pick a number: ".cyan().bold());
+            io::stderr().flush().ok();
+
+            let stdin = io::stdin();
+            let line = stdin.lock().lines().next().unwrap().unwrap_or_default();
+            let index: usize = line.trim().parse().unwrap_or(1);
+            let index = index.saturating_sub(1).min(matches.len() - 1);
+
+            Some(matches[index].clone())
+        }
     }
-
-    if matches.len() == 1 {
-        return Some(matches[0].clone());
-    }
-
-    println!("{} Multiple matches for '{}':\n", "→".cyan().bold(), query.yellow());
-
-    for (i, secret) in matches.iter().enumerate() {
-        println!(
-            "  {}  {}",
-            format!("{}", i + 1).yellow().bold(),
-            secret.key.bright_cyan()
-        );
-    }
-
-    println!();
-    eprint!("{}", "Pick a number: ".cyan().bold());
-    io::stderr().flush().ok();
-
-    let stdin = io::stdin();
-    let line = stdin.lock().lines().next().unwrap().unwrap_or_default();
-    let index: usize = line.trim().parse().unwrap_or(1);
-    let index = index.saturating_sub(1).min(matches.len() - 1);
-
-    Some(matches[index].clone())
 }
 
 fn init_store() {
@@ -269,12 +275,7 @@ fn init_store() {
 
 fn set_secret(key: String, value: String) {
     let mut store = load_store().expect("Secret store not initialized. Run 'secret init' first");
-    let password = prompt_password("Enter master password: ");
-
-    if !verify_password(&password, &store.password_hash) {
-        eprintln!("{} Wrong password", "✗".red().bold());
-        std::process::exit(1);
-    }
+    let password = ensure_authenticated(&store);
 
     let encrypted_value = encrypt_secret(&value, &password);
 
@@ -298,90 +299,87 @@ fn set_secret(key: String, value: String) {
 
 fn get_secret(key: String) {
     let store = load_store().expect("Secret store not initialized. Run 'secret init' first");
-    let password = prompt_password("Enter master password: ");
+    let password = ensure_authenticated(&store);
 
-    if !verify_password(&password, &store.password_hash) {
-        eprintln!("{} Wrong password", "✗".red().bold());
-        std::process::exit(1);
-    }
-
-    if let Some(secret) = find_secret_fuzzy(&store, &key) {
-        match decrypt_secret(&secret.encrypted_value, &password) {
+    match find_secret_fuzzy(&store, &key) {
+        Some(secret) => match decrypt_secret(&secret.encrypted_value, &password) {
             Ok(value) => println!("{}", value),
             Err(e) => {
                 eprintln!("{} {}", "✗".red().bold(), e);
                 std::process::exit(1);
             }
+        },
+        None => {
+            eprintln!("{} Secret '{}' not found", "✗".red().bold(), key.yellow());
+            std::process::exit(1);
         }
-    } else {
-        eprintln!("{} Secret '{}' not found", "✗".red().bold(), key.yellow());
-        std::process::exit(1);
     }
 }
 
 fn copy_secret(key: String) {
     let store = load_store().expect("Secret store not initialized. Run 'secret init' first");
-    let password = prompt_password("Enter master password: ");
+    let password = ensure_authenticated(&store);
 
-    if !verify_password(&password, &store.password_hash) {
-        eprintln!("{} Wrong password", "✗".red().bold());
-        std::process::exit(1);
-    }
-
-    if let Some(secret) = find_secret_fuzzy(&store, &key) {
-        match decrypt_secret(&secret.encrypted_value, &password) {
-            Ok(value) => {
-                #[cfg(target_os = "linux")]
-                {
-                    use std::process::Command;
-                    let mut child = Command::new("xclip")
-                        .arg("-selection")
-                        .arg("clipboard")
-                        .stdin(std::process::Stdio::piped())
-                        .spawn()
-                        .expect("Failed to copy. Install xclip");
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(value.as_bytes());
-                    }
-                }
-
-                #[cfg(target_os = "macos")]
-                {
-                    use std::process::Command;
-                    let mut child = Command::new("pbcopy")
-                        .stdin(std::process::Stdio::piped())
-                        .spawn()
-                        .expect("Failed to copy");
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(value.as_bytes());
-                    }
-                }
-
-                println!(
-                    "{} Secret '{}' copied to clipboard",
-                    "✓".green().bold(),
-                    secret.key.yellow()
-                );
-            }
-            Err(e) => {
-                eprintln!("{} {}", "✗".red().bold(), e);
-                std::process::exit(1);
-            }
+    let secret = match find_secret_fuzzy(&store, &key) {
+        Some(s) => s,
+        None => {
+            eprintln!("{} Secret '{}' not found", "✗".red().bold(), key.yellow());
+            std::process::exit(1);
         }
-    } else {
-        eprintln!("{} Secret '{}' not found", "✗".red().bold(), key.yellow());
-        std::process::exit(1);
+    };
+
+    let value = match decrypt_secret(&secret.encrypted_value, &password) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{} {}", "✗".red().bold(), e);
+            std::process::exit(1);
+        }
+    };
+
+    copy_to_clipboard(&value);
+
+    println!(
+        "{} Secret '{}' copied to clipboard",
+        "✓".green().bold(),
+        secret.key.yellow()
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn copy_to_clipboard(value: &str) {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("xclip")
+        .arg("-selection")
+        .arg("clipboard")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Failed to copy. Install xclip");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(value.as_bytes());
     }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_clipboard(value: &str) {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Failed to copy");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(value.as_bytes());
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn copy_to_clipboard(_value: &str) {
+    eprintln!("{} Clipboard copy not supported on this platform", "✗".red().bold());
+    std::process::exit(1);
 }
 
 fn list_secrets() {
     let store = load_store().expect("Secret store not initialized. Run 'secret init' first");
-    let password = prompt_password("Enter master password: ");
-
-    if !verify_password(&password, &store.password_hash) {
-        eprintln!("{} Wrong password", "✗".red().bold());
-        std::process::exit(1);
-    }
+    ensure_authenticated(&store);
 
     if store.secrets.is_empty() {
         println!("{} No secrets stored yet", "→".cyan().bold());
@@ -403,12 +401,7 @@ fn list_secrets() {
 
 fn delete_secret(key: String) {
     let mut store = load_store().expect("Secret store not initialized. Run 'secret init' first");
-    let password = prompt_password("Enter master password: ");
-
-    if !verify_password(&password, &store.password_hash) {
-        eprintln!("{} Wrong password", "✗".red().bold());
-        std::process::exit(1);
-    }
+    ensure_authenticated(&store);
 
     if let Some(pos) = store.secrets.iter().position(|s| s.key == key) {
         store.secrets.remove(pos);
@@ -422,12 +415,7 @@ fn delete_secret(key: String) {
 
 fn change_password() {
     let mut store = load_store().expect("Secret store not initialized. Run 'secret init' first");
-    let old_password = prompt_password("Enter current password: ");
-
-    if !verify_password(&old_password, &store.password_hash) {
-        eprintln!("{} Wrong password", "✗".red().bold());
-        std::process::exit(1);
-    }
+    let old_password = ensure_authenticated(&store);
 
     let new_password = prompt_password("Enter new password: ");
     let confirm_password = prompt_password("Confirm new password: ");
